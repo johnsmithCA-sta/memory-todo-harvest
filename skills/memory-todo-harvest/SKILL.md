@@ -4,7 +4,7 @@ slug: memory-todo-harvest
 displayName: 记忆待办归集
 summary: 把散落在 agent 记忆文件与规则文件里的待办事项，归集成一份能勾选、可按项目分组的个人待办清单，并落地成本地工作台页面。覆盖主流 agent 的记忆目录与指令文件（AGENTS.md / CLAUDE.md / GEMINI.md / Claude Code 自动记忆 / memory-bank 等），用「三类待办信号」把已完成的会话流水挡在门外，用「项目锚定」让每条待办看得出属于哪个项目，用「候选确认 + 独立判定档案」保证误收可撤回、人工判定不丢。纯标准库单脚本，全程本地运行。
 description: 从 agent 记忆文件与规则文件里归集待办清单。当用户说「待办散落在各处、记了但看不到」「从记忆/日志里提取待办」「想要一个统一待办清单」「会话记录太多全是噪音」「归集出来的待办看不懂属于哪个项目」「勾了状态怕丢」「给记忆文件做个待办面板」「把 AGENTS.md / CLAUDE.md 里的清单汇总」时使用。覆盖 AGENTS.md、CLAUDE.md、GEMINI.md、.cursorrules、.windsurfrules、.clinerules、copilot-instructions.md 及各 agent 的 memory / memory-bank 目录。不适用于：多人任务协作与派工（属项目管理工具）、从源码注释里扫 TODO（属代码扫描器）、笔记软件内建任务体系（Obsidian / Logseq 插件已覆盖）。
-version: 1.0.0
+version: 1.0.1
 license: MIT
 author: johnsmithCA-sta
 homepage: https://github.com/johnsmithCA-sta/memory-todo-harvest
@@ -276,19 +276,23 @@ python3 scripts/harvest.py
 
 ## 触发词
 
-**中文**：待办散落在各处、记了但看不到、从记忆里提取待办、从日志里提取待办、
-统一待办清单、个人待办面板、记忆文件待办、agent 待办汇总、会话记录太多都是噪音、
-归集出来的待办看不出属于哪个项目、勾了状态怕丢、给记忆文件做个清单、
-把 AGENTS.md 里的清单汇总、CLAUDE.md 待办
+- 待办散落在各处 / 记了但看不到
+- 提取待办 / 归集待办 / 整理待办 / 汇总待办
+- 统一清单 / 待办清单 / 个人待办 / 待办面板
+- 记忆文件 / 记忆目录 / 规则文件 / 日志里
+- 会话记录 / 全是噪音 / 太多太杂
+- 属于哪个项目 / 项目归属 / 看不出归属
+- 勾选之后 / 重建数据 / 判定丢失
+- AGENTS.md / CLAUDE.md / GEMINI.md / CLAUDE.local.md
 
-**English**：extract todos from agent memory, harvest todos from markdown notes,
-unified todo list from CLAUDE.md / AGENTS.md, memory file todo aggregation,
-todo list from engineering journal
+- extract todos / harvest todos / agent memory / memory files / unified todo list
 
-**不触发**：从源码注释扫 TODO（用代码扫描器）、多人任务派工、项目管理甘特图、
-在 Obsidian / Logseq 里做任务管理（用其插件）
+### 不触发
 
----
+- 从源码注释里扫 TODO 与 FIXME（用代码扫描器）
+- 多人任务协作、派工、甘特图（用项目管理工具）
+- 笔记软件内建任务体系（用其插件）
+- 记忆文件的摘要与改写（用文档处理类技能）
 
 ## 已知误报与常见疑问
 
@@ -323,4 +327,6 @@ todo list from engineering journal
 |---|---|
 | `references/配置与排障.md` | 配置陷阱、归属调优、页面对齐 |
 | `references/口径说明.md` | 归类行为说明：为什么这样判定、边界在哪 |
+| `references/Changelog.md` | 版本史 |
+| `evals/trigger_eval.json` | 触发词评估集（description 改动后回归用） |
 | `scripts/harvest.py` | 归集器（纯标准库，配置驱动） |
