@@ -102,6 +102,8 @@ def load_config(path=None):
     cfg.setdefault("dir_project_map", {})
     cfg.setdefault("stale_days", 14)
     cfg.setdefault("per_file_cap", 100)
+    cfg.setdefault("render_html", True)          # 归集后自动生成 todos.html
+    cfg.setdefault("html_out", "todos.html")     # 输出文件名（相对 data 所在目录）
     cfg["roots"] = [os.path.expanduser(r) for r in cfg["roots"]]
     for k in ("out", "state"):
         cfg[k] = cfg[k] if os.path.isabs(cfg[k]) else os.path.join(HERE, cfg[k])
@@ -136,6 +138,8 @@ def init_config(path=None):
         "agent_state_dirs": DEF_AGENT_STATE_DIRS,
         "longterm_files": DEF_LONGTERM,
         "scan_instruction_files": True,
+        "render_html": True,
+        "html_out": "todos.html",
         "_note_container_dirs": "放项目的容器目录名，它们不是项目本身",
         "container_dirs": [],
         "_note_dir_map": "目录名 → 项目台账里的项目名（中文项目名必须显式映射）",
@@ -1037,6 +1041,8 @@ def collect(dry_run=False, sample=0):
     save_wb(wb)
     log(f"✅ 已写入 todos.json：sessions {len(old_sessions)} → {len(sessions)} 条"
         f"｜项目 {len(projects)} 个｜耗时 {time.time() - t0:.2f}s")
+    if not dry_run:
+        auto_render_html()
     return sessions, wb
 
 
@@ -1058,6 +1064,95 @@ def print_sample(sessions, n):
         print(f"      {s['logBase']}")
 
 
+def apply_checked(checked_path):
+    """把 todos.html 导出的勾选结果写回清单与判定档案。
+
+    checked.json 形如 {"checked": ["T_xxx", ...], "unchecked": [...] }。
+    勾选 → 完成 + 记入判定档案；未勾选且此前为人工完成 → 撤销（支持取消完成）。
+    """
+    ensure_config()
+    try:
+        with open(checked_path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception as e:
+        log(f"❌ 读取勾选结果失败：{e}")
+        return 1
+
+    on = set(payload.get("checked") or [])
+    off = set(payload.get("unchecked") or [])
+    if not on and not off:
+        log("勾选结果为空，无事可做")
+        return 0
+
+    wb = load_wb()
+    sessions = wb.get("sessions") or []
+    by_id = {s.get("id"): s for s in sessions}
+
+    st = load_todo_state()
+    done_n = undo_n = 0
+    for tid in on:
+        t = by_id.get(tid)
+        if not t:
+            continue
+        if not t.get("done"):
+            t["done"] = True
+            t["archived"] = True
+            t["pending"] = False
+            t["kind"] = "record"
+            t["doneBy"] = "user"
+            done_n += 1
+        st["done"][tid] = {
+            "title": t.get("title") or "",
+            "logBase": t.get("logBase") or "",
+            "projectId": t.get("projectId") or "",
+            "at": time.strftime("%Y-%m-%d %H:%M"),
+            "by": "page",
+        }
+    for tid in off:
+        t = by_id.get(tid)
+        if not t:
+            continue
+        # 只撤销「人工判定」留下的完成状态；日志信号判定的不动
+        if t.get("done") and t.get("doneBy") == "user":
+            t["done"] = False
+            t["archived"] = False
+            t["kind"] = "todo"
+            t["doneBy"] = "default"
+            st["done"].pop(tid, None)
+            undo_n += 1
+
+    wb["sessions"] = sessions
+    save_wb(wb)
+    save_todo_state(st)
+    log(f"✅ 已写回：标记完成 {done_n} 条 / 撤销完成 {undo_n} 条")
+    return 0
+
+
+def auto_render_html():
+    """归集后自动生成 HTML 清单（render_todos.py 与 harvest.py 同目录）。"""
+    if not _cfg("render_html"):
+        return None
+    script = os.path.join(HERE, "render_todos.py")
+    if not os.path.isfile(script):
+        log("  [提示] 未找到 render_todos.py，跳过生成 HTML")
+        return None
+    data_path = _cfg("out")
+    if not os.path.isfile(data_path):
+        return None
+    out = _cfg("html_out")
+    out = out if os.path.isabs(out) else os.path.join(os.path.dirname(data_path), out)
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("render_todos", script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.render(data_path, out, _cfg("state"), "待办清单")
+        return out
+    except Exception as e:
+        log(f"  [提示] 生成 HTML 失败：{e}")
+        return None
+
+
 def main():
     p = argparse.ArgumentParser(
         description="从 agent 记忆文件打捞待办清单",
@@ -1073,6 +1168,9 @@ def main():
     p.add_argument("--dry-run", action="store_true", help="预览不写盘")
     p.add_argument("--sample", type=int, default=0, help="抽样打印 N 条")
     p.add_argument("--force", action="store_true", help="兼容保留（恒为全量扫描）")
+    p.add_argument("--apply-checked", metavar="FILE",
+                   help="把 todos.html 导出的 checked.json 写回清单与判定档案")
+    p.add_argument("--no-html", action="store_true", help="归集后不生成 HTML 清单")
     args = p.parse_args()
 
     if args.init:
@@ -1082,6 +1180,15 @@ def main():
         return 0
 
     load_config(args.config)
+    if args.no_html:
+        CONFIG["render_html"] = False
+
+    if args.apply_checked:
+        rc = apply_checked(args.apply_checked)
+        if rc == 0:
+            auto_render_html()
+        return rc
+
     try:
         collect(dry_run=args.dry_run, sample=args.sample)
     except Exception as e:
