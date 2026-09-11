@@ -3,8 +3,8 @@ name: memory-todo-harvest
 slug: memory-todo-harvest
 displayName: 记忆待办归集
 summary: 把散落在 agent 记忆文件与规则文件里的待办事项，归集成一份能勾选、可按项目分组的个人待办清单，并落地成本地工作台页面。覆盖主流 agent 的记忆目录与指令文件（AGENTS.md / CLAUDE.md / GEMINI.md / Claude Code 自动记忆 / memory-bank 等），用「三类待办信号」把已完成的会话流水挡在门外，用「项目锚定」让每条待办看得出属于哪个项目，用「候选确认 + 独立判定档案」保证误收可撤回、人工判定不丢。纯标准库单脚本，全程本地运行。
-description: 从 agent 记忆文件与规则文件里归集待办清单。当用户说「待办散落在各处、记了但看不到」「从记忆/日志里提取待办」「想要一个统一待办清单」「会话记录太多全是噪音」「归集出来的待办看不懂属于哪个项目」「勾了状态怕丢」「给记忆文件做个待办面板」「把 AGENTS.md / CLAUDE.md 里的清单汇总」时使用。覆盖 AGENTS.md、CLAUDE.md、GEMINI.md、.cursorrules、.windsurfrules、.clinerules、copilot-instructions.md 及各 agent 的 memory / memory-bank 目录。不适用于：多人任务协作与派工（属项目管理工具）、从源码注释里扫 TODO（属代码扫描器）、笔记软件内建任务体系（Obsidian / Logseq 插件已覆盖）。
-version: 1.0.1
+description: 从 agent 记忆文件与规则文件里归集待办清单。当用户说「待办散落在各处、记了但看不到」「从记忆/日志里提取待办」「想要一个统一待办清单」「会话记录太多全是噪音」「归集出来的待办看不懂属于哪个项目」「勾了状态怕丢」「给记忆文件做个待办面板」「把 AGENTS.md / CLAUDE.md 里的清单汇总」时使用。覆盖 AGENTS.md、CLAUDE.md、GEMINI.md、.cursorrules、.windsurfrules、.clinerules、copilot-instructions.md 及各 agent 的 memory / memory-bank 目录。不适用于：多人任务协作与派工（属项目管理工具）、从源码注释里扫 TODO（属代码扫描器）、笔记软件内建任务体系（其插件已覆盖）。
+version: 1.1.0
 license: MIT
 author: johnsmithCA-sta
 homepage: https://github.com/johnsmithCA-sta/memory-todo-harvest
@@ -25,11 +25,24 @@ tags:
 
 ## Goal（可验证输出物）
 
-| 输出 | 形态 | 验收 |
+归集完成后默认产出三件套，落在 `todos.json` 同目录：
+
+| 输出 | 是什么 | 验收 |
 |---|---|---|
+| **`todos.html`** | **可视化待办清单页面（默认产物）** | 双击可看；按项目分组、可筛选、可折叠、可勾选导出 |
 | `todos.json` | 结构化待办清单 | 每条含标题、状态、来源文件、归属项目、事由标签 |
 | `todo-state.json` | 人工判定档案 | 勾选/忽略的判定落在这里，与清单解耦，可单独备份 |
-| 本地页面 | 分组待办面板 | 按项目分组、可勾选、可批量处置 |
+
+页面是**自包含**的：内联 CSS / JS，零外部依赖、不联网，可离线打开、可直接分享给别人看。
+
+**勾选怎么落盘**：浏览器改不了磁盘文件，所以走两步——
+页面里勾选 → 点「导出勾选结果」得到 `checked.json` →
+
+```bash
+python3 scripts/harvest.py --apply-checked ./checked.json
+```
+
+写回会同时更新清单与判定档案（勾选→完成；取消勾选→撤销人工完成），并自动重新生成页面。
 
 ## 什么时候用
 
@@ -42,8 +55,8 @@ tags:
 
 - 记忆文件里几乎不写待办 —— 先改书写习惯（见「源头约定」），否则抽出来是空的
 - 需要多人协作、派工、甘特图 —— 那是项目管理工具
-- 想从**源码注释**里扫 `TODO:` —— 那是代码扫描器（leasot / TODO Tree / notectl 一类）的活
-- 已经在用笔记软件（Obsidian / Logseq）的任务体系，且任务都规范写成 checkbox —— 用它们的插件更顺
+- 想从**源码注释**里扫 `TODO:` —— 那是代码扫描器一类工具的活
+- 已经在用笔记软件的任务体系，且任务都规范写成 checkbox —— 用其内建插件更顺
 - 期待**自动判断待办是否已完成** —— 本技能明确不做，见「不该做的两件事」
 
 ## 不该做的两件事
@@ -136,15 +149,30 @@ python3 scripts/harvest.py
 
 产出 `todos.json` + `todo-state.json`。**连跑两遍，输出应完全一致**（幂等）。
 
-### 4. 接页面
+### 4. 看清单
 
-`todos.json` 是纯数据，用一个最小本地 HTTP 服务渲染即可。
-页面侧四条硬要求见「呈现要点」。
+归集时已自动生成 `todos.html`，直接双击打开。单独渲染：
 
-### 5. 日常维护
+```bash
+python3 scripts/render_todos.py --data ./todos.json --out ./todos.html
+```
+
+只想要数据、不要页面：`python3 scripts/harvest.py --no-html`。
+四条页面硬要求见「呈现要点」。
+
+### 5. 勾完成并写回
+
+```bash
+# 页面里勾选 → 导出 checked.json → 写回
+python3 scripts/harvest.py --apply-checked ./checked.json
+```
+
+写回后自动重新渲染页面。**判定档案会记住你的勾选，下次归集不会丢。**
+
+### 6. 日常维护
 
 - 新写的待办：重新跑一次脚本
-- 勾完成 / 忽略：页面操作 → 写进 `todo-state.json`
+- 勾完成 / 忽略：页面导出 + `--apply-checked`
 - 项目结项：批量归档 + 保留可界定的反向操作
 
 ---
@@ -318,8 +346,8 @@ python3 scripts/harvest.py
 2. `harvest.py --dry-run` → 确认命中量在几十条、不是上千条
 3. `harvest.py --dry-run --sample 60` → 逐条核准，准确率 ≥ 90% 才继续
 4. `harvest.py` → 写盘；再跑一遍确认幂等
-5. 用最小本地 HTTP 服务渲染 `todos.json`（分组 / 勾选 / 批量处置按「呈现要点」）
-6. 日常：新内容重跑脚本；页面勾选写进 `todo-state.json`
+5. 打开自动生成的 `todos.html` 看清单
+6. 日常：新内容重跑脚本；页面勾选 → 导出 → `--apply-checked` 写回
 
 ## 参考
 
@@ -330,3 +358,4 @@ python3 scripts/harvest.py
 | `references/Changelog.md` | 版本史 |
 | `evals/trigger_eval.json` | 触发词评估集（description 改动后回归用） |
 | `scripts/harvest.py` | 归集器（纯标准库，配置驱动） |
+| `scripts/render_todos.py` | 清单 → 本地 HTML 页面 |
