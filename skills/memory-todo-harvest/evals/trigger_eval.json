@@ -1,0 +1,27 @@
+{
+ "should_trigger": [
+  "我的待办散落在各处，各个项目都有一点，记了但从来不看",
+  "帮我把 memory 日志里的待办提取出来做成清单",
+  "从记忆文件里提取待办",
+  "想要一个统一清单，数据源就用 agent 自己写的日志",
+  "会话记录太多了全是噪音",
+  "归集出来的待办看不懂属于哪个项目",
+  "在页面上勾选之后，怕哪天重建数据就丢了",
+  "把 AGENTS.md 和 CLAUDE.md 里的清单汇总一下",
+  "HARVEST todos from agent memory files",
+  "extract todos from agent memory，统一成一份清单",
+  "想给自己做个本地待办面板，从 markdown 记忆文件里读数据",
+  "记忆目录里写了不少下一步和未完成，散在各项目想看个总览"
+ ],
+ "should_not_trigger": [
+  "帮我从源码注释里把 TODO 和 FIXME 都扫出来",
+  "给我建一个多人协作的任务看板，要能派工和看甘特图",
+  "我在 Obsidian 里想做任务管理，推荐个插件",
+  "把这段记忆文件的内容总结成一段话",
+  "帮我写一条 git commit message",
+  "这个 skill 安全吗，帮我扫描一下",
+  "把这份 PDF 的表格提取成 CSV",
+  "解释一下 AGENTS.md 和 CLAUDE.md 有什么区别"
+ ],
+ "_note": "评估集用于校验 description 的触发精准度：should_trigger 为技能域内的真实用户说法，should_not_trigger 为相邻但不应触发的请求。修改 description 后重跑评测，触发率应 ≥ 0.7 且误触发为 0。"
+}
