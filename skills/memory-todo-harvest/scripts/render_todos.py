@@ -119,13 +119,20 @@ color:var(--tx);cursor:pointer}
 var P=JSON.parse(document.getElementById('payload').textContent);
 var S=P.sessions||[], PR=P.projects||[];
 var LS='memory_todo_harvest_checked';
-var checked={};
+var checked={};    /* 条目 id → 勾选态 */
+var checkedT={};   /* 规范化标题 → 勾选态：记忆里的文字被改写后 id 会变，用它兜住 */
 try{checked=JSON.parse(localStorage.getItem(LS)||'{}')}catch(e){checked={}}
-function save(){try{localStorage.setItem(LS,JSON.stringify(checked))}catch(e){}}
+try{checkedT=JSON.parse(localStorage.getItem(LS+'__t')||'{}')}catch(e){checkedT={}}
+function save(){try{localStorage.setItem(LS,JSON.stringify(checked))}catch(e){}
+try{localStorage.setItem(LS+'__t',JSON.stringify(checkedT))}catch(e){}}
+function norm(s){return String(s==null?'':s).toLowerCase().replace(/[^\\w\\u4e00-\\u9fff]+/g,'')}
+function titleHit(t){var n=norm(t.title);if(n.length<6)return false;
+for(var k in checkedT){if(checkedT[k]&&k.length>=6&&(k.indexOf(n)>=0||n.indexOf(k)>=0))return true}
+return false}
 function pn(id){for(var i=0;i<PR.length;i++){if(PR[i].id===id)return PR[i].name}return ''}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){
 return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
-function isDone(t){return !!t.done||!!checked[t.id]}
+function isDone(t){return !!t.done||!!checked[t.id]||titleHit(t)}
 var pend=S.filter(function(t){return t.pending&&!isDone(t)});
 var act=S.filter(function(t){return !isDone(t)&&!t.stale&&!t.pending});
 var stale=S.filter(function(t){return !isDone(t)&&t.stale&&!t.pending});

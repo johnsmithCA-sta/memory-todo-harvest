@@ -372,8 +372,17 @@ def save_todo_state(st):
     os.replace(tmp, _cfg("state"))
 
 
+def norm_title(t):
+    """标题规范化：去标点 / 空白 / 反引号 / 大小写差异，只留字母数字与汉字。
+
+    用于跨版本比对「是不是同一条待办」——源文本被改写后原文不同，
+    规范化后才看得出是同一件事。
+    """
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", str(t or "").lower())
+
+
 def title_grams(t):
-    t = re.sub(r"[^\w\u4e00-\u9fff]+", "", str(t or "").lower())
+    t = norm_title(t)
     return set(t[i:i + 2] for i in range(len(t) - 1)) if len(t) >= 2 else set()
 
 
@@ -385,34 +394,85 @@ def title_sim(a, b):
     return len(A & B) / len(A | B)
 
 
-def resolve_state(sid, title, logbase, st, same_file=0.6, cross_file=0.85):
+def title_overlap(a, b):
+    """重叠率 = |A∩B| / min(|A|,|B|)：对「长标题被删补语」免疫。
+
+    Jaccard 单独用有盲区：原文被删掉尾补语时，短标题的 gram 全落在长标题里，
+    但分母仍是「并集」，分数会明显偏低（实测两条分别只有 0.562 / 0.395，
+    双双跌破同文件阈值 0.6），于是已完成的条目会退回未完成、已忽略的会重新
+    回到候选区 —— 表现就是「勾了又变回来 / 怎么点都消不掉」。
+
+    重叠率对这种情况恒为 1.0。它只作为 Jaccard 之外的**受限补充通道**使用
+    （见 resolve_state）：仅同文件、且规范化后短串足够长才启用，防止极短串乱吞。
+    """
+    A, B = title_grams(a), title_grams(b)
+    if not A or not B:
+        return 0.0
+    return len(A & B) / min(len(A), len(B))
+
+
+def resolve_state(sid, title, logbase, st, same_file=0.6, cross_file=0.85,
+                  containment=0.9, contain_min_len=6):
     """人工判定优先：先精确 id，再模糊标题（抗标题微调导致的 id 漂移）。
 
-    分级阈值（2026-09-11 实测标定）：
-      · 同一 memory 文件（同一天同一 logBase）→ 宽松 0.6，冲突概率低（同日同文件的
+    分级阈值（实测标定）：
+      · 同一记忆文件（同一 logBase）→ 宽松 0.6，冲突概率低（同文件的
         两条不同待办标题极少高度相似）
       · 跨文件 → 严格 0.85，且相似度先打 0.9 折，避免把别的待办误认成同一条
-    宁可不匹配（退回未完成，人工再勾一次），也不能误匹配（错误关闭真实待办）。
+
+    补充通道（2026-09-13）：同文件内再加一条「包含关系」——短标题是长标题的
+    子串（重叠率 ≥ 0.9）。原文被删掉尾补语时 Jaccard 会跌破 0.6，而重叠率仍是
+    1.0；只认同文件、且规范化后短串 ≥ 6 字，避免极短串乱吞长标题。
+
+    取向不变：宁可不匹配（退回未完成，人工再勾一次），也不能误匹配
+    （错误关闭真实待办）。
 
     返回 (kind|None, matched_key)。kind ∈ {done, dismissed}
     """
     for kind in ("dismissed", "done"):
         if sid in (st.get(kind) or {}):
             return kind, sid
+    nt = norm_title(title)
     best_sc, best_kind, best_key = 0.0, None, None
     for kind in ("dismissed", "done"):
         for k, v in (st.get(kind) or {}).items():
             lb = v.get("logBase") or ""
-            sc = title_sim(title, v.get("title") or "")
-            if lb and logbase and lb == logbase:
-                score, need = sc, same_file
+            vt = v.get("title") or ""
+            same = bool(lb and logbase and lb == logbase)
+            if same:
+                score, need = title_sim(title, vt), same_file
             else:
-                score, need = sc * 0.9, cross_file
-            if score >= need and score > best_sc:
+                score, need = title_sim(title, vt) * 0.9, cross_file
+            hit = score >= need
+            if not hit and same and len(nt) >= contain_min_len:
+                ov = title_overlap(title, vt)
+                if ov >= containment:
+                    hit, score = True, ov
+            if hit and score > best_sc:
                 best_sc, best_kind, best_key = score, kind, k
     if best_kind:
         return best_kind, best_key
     return None, None
+
+
+def find_old_by_overlap(it, old_sessions, min_ratio=0.9, min_len=6):
+    """同文件内按「包含关系」找回旧记录（供候选状态继承用）。
+
+    与 resolve_state 的包含通道同源：源文本被改写后 id 变了，旧记录里的人工状态
+    （已确认 pending=false / 已勾完成）必须跟着走，否则「已经处理过的任务」
+    每次运行都会重新变成待确认候选。
+    """
+    nt = norm_title(it["title"])
+    if len(nt) < min_len:
+        return None
+    best, best_ov = None, 0.0
+    for s in old_sessions:
+        if not s.get("id") or (s.get("logFile") or "") != it["logFile"]:
+            continue
+        ov = title_overlap(it["title"], s.get("title"))
+        if ov >= min_ratio and ov > best_ov:
+            best, best_ov = s, ov
+    return best
 
 
 def extract_context(before):
@@ -815,8 +875,28 @@ def build_project_index(projects):
     return idx
 
 
+# 匹配前先剥离「路径 / 点文件」片段：它们是路径，不是项目指代，却常包含项目或产品名。
+# 典型误判：待办正文里写了 `.workbuddy/`、`~/.cursor/rules/xxx` 这类路径，
+# 而某个项目名恰好是「WorkBuddy」或「cursor」——标题通道权重高于事由通道，
+# 条目于是被从正确的项目抢进那个同名项目分组。
+# 只剥离 ASCII 路径：正文里的中文必须原样保留。
+RE_PATH_FRAG = re.compile(
+    r"~?/[A-Za-z0-9._\-]*(?:/[A-Za-z0-9._\-]*)*"           # /abs/path、~/abs/path
+    r"|\.[A-Za-z_][A-Za-z0-9._\-]*(?:/[A-Za-z0-9._\-]*)*"  # .workbuddy、.cursor/rules
+)
+
+
+def strip_path_frags(text):
+    """剥离文本里的路径 / 点文件片段（仅供项目匹配使用）。
+
+    注意字符类必须限定 ASCII：Python 的 \\w 默认含汉字，写成 [\\w./-] 会把
+    「A / B 两条管线」这类正文整段吞掉。
+    """
+    return RE_PATH_FRAG.sub(" ", text or "")
+
+
 def match_project(text, idx):
-    t = text or ""
+    t = strip_path_frags(text)
     tl = t.lower()
     for kw, p in idx:
         if kw.lower() in tl or kw in t:
@@ -850,9 +930,18 @@ def collect(dry_run=False, sample=0):
         projects = wb.get("projects", [])
     old_sessions = wb.get("sessions", []) or []
     old_by_id = {s.get("id"): s for s in old_sessions if s.get("id")}
+    # 抗标题漂移的二级索引：源文本被改写后 id 会变，
+    # 只按 id 找旧记录会让「已确认」的条目重新退回候选区。
+    old_by_key = {}
+    for _s in old_sessions:
+        if not _s.get("id"):
+            continue
+        old_by_key.setdefault(
+            (_s.get("logFile") or "", norm_title(_s.get("title"))), _s)
     legacy_dismissed = set(wb.get("dismissed") or [])   # 旧字段（兼容保留）
     tstate = load_todo_state()                          # 人工判定档案（兜底）
     state_hits, state_fuzzy, migrated = 0, 0, 0
+    migrated_from = {}                                  # 旧 id → 新 id（供补齐逻辑避让）
     # 是否已有历史数据：候选制据此决定「首次全量」还是「增量提名」
     had_v4 = any(str(s.get("id", "")).startswith("T_") for s in old_sessions)
 
@@ -916,12 +1005,27 @@ def collect(dry_run=False, sample=0):
             continue                              # 人工已忽略（旧字段）
         state_kind, matched = resolve_state(sid, it["title"], it["logBase"], tstate)
         if state_kind == "dismissed":
+            # 自愈：模糊命中（源文本被改写导致 id 漂移）→ 把黑名单记录迁到新 id，
+            # 下次起精确命中，不再每次归集都依赖模糊通道
+            if matched and matched != sid:
+                rec = dict(tstate["dismissed"].pop(matched, {}))
+                rec.update({"title": it["title"], "logBase": it["logBase"],
+                            "at": time.strftime("%Y-%m-%d %H:%M"), "by": "migrated"})
+                tstate["dismissed"][sid] = rec
+                migrated_from[matched] = sid
+                migrated += 1
             continue                              # 人工已忽略（状态档案）
         if state_kind == "done":
             state_hits += 1
             if matched != sid:
                 state_fuzzy += 1
-        old = old_by_id.get(sid, {})
+        # 旧记录查找：精确 id → 规范标题 → 同文件包含关系（都查不到才是真新条目）
+        old = old_by_id.get(sid)
+        if old is None:
+            old = old_by_key.get((it["logFile"], norm_title(it["title"])))
+        if old is None:
+            old = find_old_by_overlap(it, old_sessions)
+        old = old or {}
 
         # 优先级：人工判定档案 > workbench 里的人工状态 > 日志信号 > 默认
         if state_kind == "done":
@@ -948,6 +1052,7 @@ def collect(dry_run=False, sample=0):
             rec.update({"title": it["title"], "logBase": it["logBase"],
                         "at": time.strftime("%Y-%m-%d %H:%M"), "by": "migrated"})
             pool[sid] = rec
+            migrated_from[matched] = sid
             migrated += 1
 
         sessions.append({
@@ -1014,6 +1119,10 @@ def collect(dry_run=False, sample=0):
     for s_old in old_sessions:
         oid = s_old.get("id")
         if s_old.get("doneBy") != "user" or not oid:
+            continue
+        if oid in migrated_from:
+            # 该条判定已随 id 迁移到新 id。这里若不跳过，会把刚迁移走的旧 id
+            # 又补回档案（同一件事留两份），下次改写时判定在两条之间来回跳。
             continue
         if s_old.get("done") and oid not in tstate["done"]:
             tstate["done"][oid] = {
