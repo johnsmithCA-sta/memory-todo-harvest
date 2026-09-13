@@ -251,7 +251,20 @@ def _age_days(date_str):
     return (dt.date.today() - d).days
 
 
+# ================================================================ 归集口径常量
+# 显式待办标记：inline = `**待办**：xxx`（含 ①②③ 拆分），checkbox = `- [ ] xxx`。
+# 这两类是人**主动写下**的待办，不属于「机器从正文推断」——归集时直接转正，
+# 不进「新发现 · 待确认」。候选制的价值在于拦住推断出来的条目；对显式标记
+# 再要一遍人工确认属重复劳动。
+EXPLICIT_SRC = {"inline", "checkbox"}
+
+
 # ================================================================ 文本清洗
+TITLE_MAX = 200
+# 标题长度上限。取值要**容得下完整的一句话**：待办正文常带长路径、命令或说明，
+# 截得太短会只剩半句（例如「…（tag 」），清单上看不出这条待办到底在讲什么。
+
+
 def mask_secret(text):
     """待办文本内的凭据明文一律掩码（本地文件同样执行，防误传/误截图）。"""
     return RE_SECRET.sub(lambda m: f"{m.group(1)}：***（已掩码）", text or "")
@@ -271,7 +284,7 @@ def clean_item(raw):
     t = RE_TIME_ONE.sub("", t)
     t = t.strip(" ：:—-–·、,，.。;；")
     t = RE_SPACES.sub(" ", t)
-    return mask_secret(t)[:120]
+    return mask_secret(t)[:TITLE_MAX]
 
 
 def clean_heading(raw):
@@ -344,12 +357,17 @@ def detect_status(text):
 
 
 def load_todo_state():
-    """人工判定档案：{done:{id:{title,logBase,...}}, dismissed:{...}}。
+    """人工判定档案：{done:{...}, dismissed:{...}, assigned:{...}}。
 
-    与 workbench.json（归集派生物）解耦：归集重建 sessions 时判定不会丢，
-    可单独备份；标题微调导致 id 漂移时靠模糊匹配兜住。
+    与归集产物解密：重新归集时判定不会丢，可单独备份；
+    标题微调导致 id 漂移时靠模糊匹配兜住。
+
+    · done       —— 已完成（页面勾选写回）
+    · dismissed  —— 已忽略（不再捞回）
+    · assigned   —— 人工指定的归属（页面调整分组后写回）。归集时优先于自动
+                    打分；只改产物不写这里，下次归集就会被重算覆盖。
     """
-    empty = {"done": {}, "dismissed": {}}
+    empty = {"done": {}, "dismissed": {}, "assigned": {}}
     if not os.path.isfile(_cfg("state")):
         return empty
     try:
@@ -357,6 +375,7 @@ def load_todo_state():
             d = json.load(f)
         d.setdefault("done", {})
         d.setdefault("dismissed", {})
+        d.setdefault("assigned", {})
         return d
     except Exception as e:
         log(f"[warn] todo-state.json 读取失败：{e}")
@@ -475,6 +494,27 @@ def find_old_by_overlap(it, old_sessions, min_ratio=0.9, min_len=6):
     return best
 
 
+def find_assigned_by_overlap(it, assigned, min_ratio=0.9, min_len=6):
+    """同文件内按「包含关系」找回「人工指定归属」记录。
+
+    与 find_old_by_overlap 同源。人工指定的归属要比完成 / 忽略更抗漂移 ——
+    它不是「这条办完了」，而是「这条属于哪个项目」；一旦丢失，条目会退回
+    自动打分的结果，表现为「调过的分组下次又变回去了」。
+    记录里只有 logBase + title，所以按 logBase 判同文件。
+    """
+    nt = norm_title(it["title"])
+    if len(nt) < min_len:
+        return {}
+    best, best_ov = None, 0.0
+    for _sid, rec in (assigned or {}).items():
+        if (rec.get("logBase") or "") != it["logBase"]:
+            continue
+        ov = title_overlap(it["title"], rec.get("title"))
+        if ov >= min_ratio and ov > best_ov:
+            best, best_ov = rec, ov
+    return best or {}
+
+
 def extract_context(before):
     """从「待办：」之前的前缀里提取项目/主题标识。
 
@@ -587,8 +627,8 @@ def sanitize_context(c):
 def in_backticks(line, pos):
     """pos 是否落在反引号包裹的行内代码里。
 
-    存在意义：文档在举例说明「待办：」写法时（如工作台自身的执行记录），
-    行内代码里的标记并不是真待办 —— 2026-09-11 实测自噬 3 条，必须排除。
+    存在意义：文档在举例说明「待办：」写法时（例如示例段落里写 `**待办**：xxx`），
+    行内代码里的标记并不是真待办。不加这层排除，示例会被当成真待办捞进清单。
     """
     return line[:pos].count("`") % 2 == 1
 
@@ -944,6 +984,9 @@ def collect(dry_run=False, sample=0):
     migrated_from = {}                                  # 旧 id → 新 id（供补齐逻辑避让）
     # 是否已有历史数据：候选制据此决定「首次全量」还是「增量提名」
     had_v4 = any(str(s.get("id", "")).startswith("T_") for s in old_sessions)
+    # 人工指定归属档案（页面调整分组 → 导出 → --apply-checked 写入）
+    assigned_map = tstate.get("assigned") or {}
+    assigned_hits = 0
 
     pairs = find_log_files()
     log(f"[1/4] 记忆文件：{len(pairs)} 个")
@@ -997,8 +1040,6 @@ def collect(dry_run=False, sample=0):
         best = max(sig, key=lambda x: x[0] if x[1] else -1)
         if best[1]:
             pid, kwsrc = best[1]["id"], best[2]
-        if not pid:
-            unmatched += 1
 
         sid = "T_" + hashlib.md5(f"{it['logFile']}::{it['title']}".encode("utf-8")).hexdigest()[:11]
         if sid in legacy_dismissed:
@@ -1027,7 +1068,21 @@ def collect(dry_run=False, sample=0):
             old = find_old_by_overlap(it, old_sessions)
         old = old or {}
 
-        # 优先级：人工判定档案 > workbench 里的人工状态 > 日志信号 > 默认
+        # 人工指定归属：优先级高于上面全部自动打分。自动打分本质是猜（只能说
+        # 「最像哪个项目」，说不出「不属于这里」），猜错时人给的答案必须在
+        # **下一次归集之后依然生效** —— 所以读独立档案，而不是只改产物。
+        assigned = assigned_map.get(sid) or {}
+        if not assigned:
+            assigned = find_assigned_by_overlap(it, assigned_map)
+        if assigned:
+            # projectId 为空串 = 人指定为「未分类」；有值 = 指定到该项目。
+            # 只要该条在档案里出现过，就以人的指定为准，不回落到自动打分。
+            pid, kwsrc = assigned.get("projectId") or "", "人工指定"
+            assigned_hits += 1
+        if not pid:
+            unmatched += 1
+
+        # 优先级：人工判定档案 > 产物里的人工状态 > 日志信号 > 默认
         if state_kind == "done":
             done, done_by = True, "user"
         elif old.get("doneBy") == "user":
@@ -1037,8 +1092,18 @@ def collect(dry_run=False, sample=0):
         else:
             done, done_by = bool(it["done"]), "default"
 
-        # 候选制：老条目沿用；首次迁移全量信任；此后新出现的才进候选
-        if old:
+        # 候选制分级：
+        #   ① 归属已被人工指定过 → 转正（组都选过了，没必要再确认一遍）
+        #   ② 显式标记（`**待办**：` / `- [ ]`）→ 转正。人主动写下的待办不是
+        #      「机器新提名」，再要一遍确认属重复劳动；这里**不看**旧值，
+        #      把此前已积压在候选区的显式条目一并释放。
+        #   ③ 其余（机器从章节正文推断出来的）→ 沿用旧值；首次迁移全量信任；
+        #      此后新出现的才进候选区。
+        if assigned:
+            pending = False
+        elif it.get("src") in EXPLICIT_SRC:
+            pending = False
+        elif old:
             pending = bool(old.get("pending", False))
         elif not had_v4:
             pending = False
@@ -1084,12 +1149,16 @@ def collect(dry_run=False, sample=0):
     sessions.sort(key=lambda s: (1 if s["done"] else 0,
                                  "" if s["done"] else _rev(s["logDate"]),
                                  _rev(s["logDate"])))
+    n_pend = sum(1 for s in sessions if not s["done"] and s["pending"])
     log(f"[4/4] 生成待办 {len(sessions)} 条（未完成 "
         f"{sum(1 for s in sessions if not s['done'])} / 已完成 "
-        f"{sum(1 for s in sessions if s['done'])}）｜未分类 {unmatched} 条")
+        f"{sum(1 for s in sessions if s['done'])}）｜未分类 {unmatched} 条"
+        f"｜待确认候选 {n_pend} 条")
     if state_hits or migrated:
         log(f"      人工判定档案命中 {state_hits} 条"
             f"（其中模糊匹配 {state_fuzzy} 条、id 自愈迁移 {migrated} 条）")
+    if assigned_hits:
+        log(f"      人工指定归属 {assigned_hits} 条（页面调整过分组，优先于自动判定）")
     # 审计：两个载体的计数应互相印证（档案为空但 workbench 有大量人工标记 = 可疑）
     wb_user = sum(1 for s in old_sessions if s.get("doneBy") == "user")
     st_n = len(tstate.get("done") or {})
@@ -1174,23 +1243,30 @@ def print_sample(sessions, n):
 
 
 def apply_checked(checked_path):
-    """把 todos.html 导出的勾选结果写回清单与判定档案。
+    """把 todos.html 导出的结果写回清单与判定档案。
 
-    checked.json 形如 {"checked": ["T_xxx", ...], "unchecked": [...] }。
-    勾选 → 完成 + 记入判定档案；未勾选且此前为人工完成 → 撤销（支持取消完成）。
+    checked.json 形如：
+        {"checked": ["T_xxx", ...], "unchecked": [...], "assign": {"T_xxx": "p_abc"}}
+
+    · checked   → 完成 + 记入判定档案
+    · unchecked → 未勾选且此前为人工完成 → 撤销（支持取消完成）
+    · assign     → 调整归属：写进判定档案的 assigned 段，归集时优先于自动判定。
+                   值为空串表示改回「未分类」。旧版导出的文件没有这个字段，
+                   照常工作。
     """
     ensure_config()
     try:
         with open(checked_path, encoding="utf-8") as f:
             payload = json.load(f)
     except Exception as e:
-        log(f"❌ 读取勾选结果失败：{e}")
+        log(f"❌ 读取结果文件失败：{e}")
         return 1
 
     on = set(payload.get("checked") or [])
     off = set(payload.get("unchecked") or [])
-    if not on and not off:
-        log("勾选结果为空，无事可做")
+    assign = payload.get("assign") or {}
+    if not on and not off and not assign:
+        log("结果为空，无事可做")
         return 0
 
     wb = load_wb()
@@ -1230,10 +1306,36 @@ def apply_checked(checked_path):
             st["done"].pop(tid, None)
             undo_n += 1
 
+    # 归属调整：只接受配置里登记过的项目（空串 = 未分类），避免写进不存在的 id。
+    # 结果落判定档案，下次归集优先采用；重复调整以最后一次为准。
+    assign_n = 0
+    if assign:
+        known = {p.get("id") for p in (_cfg("projects") or [])}
+        st.setdefault("assigned", {})
+        for tid, pid in assign.items():
+            t = by_id.get(tid)
+            if not t:
+                continue
+            pid = (pid or "").strip()
+            if pid and pid not in known:
+                log(f"  [跳过] 未在配置里登记的项目 id：{pid}")
+                continue
+            t["projectId"] = pid
+            t["projectSource"] = "人工指定"
+            st["assigned"][tid] = {
+                "projectId": pid,
+                "title": t.get("title") or "",
+                "logBase": t.get("logBase") or "",
+                "at": time.strftime("%Y-%m-%d %H:%M"),
+                "by": "page",
+            }
+            assign_n += 1
+
     wb["sessions"] = sessions
     save_wb(wb)
     save_todo_state(st)
-    log(f"✅ 已写回：标记完成 {done_n} 条 / 撤销完成 {undo_n} 条")
+    log(f"✅ 已写回：标记完成 {done_n} 条 / 撤销完成 {undo_n} 条"
+        + (f" / 调整归属 {assign_n} 条" if assign_n else ""))
     return 0
 
 

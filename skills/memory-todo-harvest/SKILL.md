@@ -2,9 +2,9 @@
 name: memory-todo-harvest
 slug: memory-todo-harvest
 displayName: 记忆待办归集
-summary: 把散落在 agent 记忆文件与规则文件里的待办事项，归集成一份能勾选、可按项目分组的本地待办清单，并生成一份自包含的可视化页面。覆盖各家 agent 的记忆目录与项目指令文件（各家规则文件、自动记忆目录、memory-bank 等），只认显式待办信号把已完成的会话流水挡在门外，并给每条待办标出它属于哪个项目、为什么事留下。纯标准库单脚本，不联网，数据全在本机。
+summary: 把散落在 agent 记忆文件与规则文件里的待办事项，归集成一份能勾选、可按项目分组、可手工纠正归属的本地待办清单，并生成一份自包含的可视化页面。覆盖各家 agent 的记忆目录与项目指令文件（各家规则文件、自动记忆目录、memory-bank 等），只认显式待办信号把已完成的会话流水挡在门外，并给每条待办标出它属于哪个项目、为什么事留下。纯标准库单脚本，不联网，数据全在本机。
 description: 从 agent 的记忆文件与规则文件里归集待办清单，并生成可勾选的本地页面。当用户说「待办散落在各处、记了但看不到」「从记忆/日志里提取待办」「想要一个统一待办清单」「会话记录太多全是噪音」「归集出来的待办看不懂属于哪个项目」「勾了状态怕丢」「给记忆文件做个待办面板」「把项目里的规则文件清单汇总」时必须优先触发。覆盖 AGENTS.md、GEMINI.md、.cursorrules、.windsurfrules、.clinerules、copilot-instructions.md 等各家指令文件，以及各 agent 的 memory / memory-bank 目录。不适用于：多人任务协作与派工（属项目管理工具）、从源码注释里扫 TODO（属代码扫描器）、笔记软件内建任务体系（其插件已覆盖）。
-version: 1.1.2
+version: 1.2.0
 license: MIT
 author: johnsmithCA-sta
 homepage: https://github.com/johnsmithCA-sta/memory-todo-harvest
@@ -21,7 +21,7 @@ tags:
 
 # 记忆待办归集（memory-todo-harvest）
 
-把 agent 每天写下的**记忆流水**与**规则文件**，变成一份**能勾、能分组、能追**的本地待办清单。
+把 agent 每天写下的**记忆流水**与**规则文件**，变成一份**能勾、能分组、能追、能改**的本地待办清单。
 
 ## 定位
 
@@ -61,9 +61,9 @@ tags:
 
 | 输出 | 是什么 | 验收 |
 |---|---|---|
-| **`todos.html`** | 可视化待办清单页面（默认产物） | 双击可看；按项目分组、可筛选、可折叠、可勾选导出 |
+| **`todos.html`** | 可视化待办清单页面（默认产物） | 双击可看；按项目分组、可筛选、可折叠、可勾选导出、可调整归属 |
 | `todos.json` | 结构化待办清单 | 每条含标题、状态、来源文件、归属项目、事由标签 |
-| `todo-state.json` | 人工判定档案 | 勾选 / 忽略的判定落在这里，与清单解耦、可单独备份 |
+| `todo-state.json` | 人工判定档案 | 勾选 / 忽略 / 归属调整的判定落在这里，与清单解耦、可单独备份 |
 
 页面是**自包含**的：内联 CSS / JS，零外部依赖、不联网，可离线打开、可直接分享给别人看。
 
@@ -156,19 +156,26 @@ python3 scripts/render_todos.py --data ./todos.json --out ./todos.html
 
 只想要数据、不要页面：`python3 scripts/harvest.py --no-html`。
 
-### 5. 勾完成后写回
+### 5. 勾完成、调归属后写回
 
-浏览器改不了磁盘文件，所以走两步——页面里勾选 → 点「导出勾选结果」得到 `checked.json`：
+浏览器改不了磁盘文件，所以走两步——页面里勾选，或点条目右侧「改组」调整归属 →
+再点「导出勾选结果」得到 `checked.json`：
 
 ```bash
 python3 scripts/harvest.py --apply-checked ./checked.json
 ```
 
-写回会同时更新清单与判定档案（勾选 → 完成；取消勾选 → 撤销人工完成），并自动重新渲染页面。
+写回会同时更新清单与判定档案：
+
+- **勾选** → 完成；取消勾选 → 撤销人工完成
+- **调整归属** → 记进判定档案，之后每次归集都优先采用，不会被重新打分覆盖；
+  选「未分类」也可以，等于把它从一个分错的分组里摘出来
+
+写回后会自动重新渲染页面。
 
 ### 6. 日常维护
 
-新写了待办 → 重跑一次脚本；勾完成 / 忽略 → 页面导出 + `--apply-checked`。
+新写了待办 → 重跑一次脚本；勾完成 / 调整归属 → 页面导出 + `--apply-checked`。
 
 ## Verification Checklist
 
@@ -179,6 +186,7 @@ python3 scripts/harvest.py --apply-checked ./checked.json
 - [ ] 抽查 5 条，项目归属与事由标签可读
 - [ ] 页面零控制台错误；折叠组重渲染两次仍保持展开；勾选不触发整页重排
 - [ ] 改过某条待办的文字后重跑，这条的勾选仍在（判定不丢）
+- [ ] 在页面调整过某条的归属、写回后重跑，这条仍归在你选的项目下（人工归属不被覆盖）
 - [ ] 清单里不含密码 / token 明文
 
 ## 使用示例
@@ -191,7 +199,7 @@ python3 scripts/harvest.py --apply-checked ./checked.json
 3. `harvest.py --dry-run --sample 60` → 逐条核准，准确率 ≥ 90% 才继续
 4. `harvest.py` → 写盘；再跑一遍确认幂等
 5. 打开自动生成的 `todos.html` 看清单
-6. 日常：新内容重跑脚本；页面勾选 → 导出 → `--apply-checked` 写回
+6. 日常：新内容重跑脚本；页面勾选 / 调整归属 → 导出 → `--apply-checked` 写回
 7. 之后又改写过记忆文件里某条待办的文字 → 重跑，这条的勾选还在
 
 ## 常见错误
@@ -215,6 +223,17 @@ python3 scripts/harvest.py --apply-checked ./checked.json
 - 症状：某条待办出现在一个跟它无关的项目分组里
 - 原因：正文里的**路径片段**（如 `~/.xxx/skills/foo`）撞上了另一个项目的名字
 - 修复：匹配前路径 / 点文件片段会被剥离；仍出现就把撞名的项目关键词改得更具体
+
+**分对了没有？分错了想改**
+- 症状：某条待办落在看起来不对的项目分组里，页面上没地方改
+- 修复：点那条右侧的「改组」，选正确的项目（或「未分类」）——归属是**打分猜出来的**，
+  猜错很正常，所以留了这个出口
+
+**改过的归属过一阵又变回去**
+- 症状：页面上把某条调到了别的项目，重跑后又回到原来那个组
+- 原因：页面上的调整只是**本地草稿**，没走导出 + `--apply-checked`，没写进判定档案；
+  归集每次都按标题 / 事由重新打分，草稿自然被覆盖
+- 修复：改完点「导出勾选结果」→ 跑 `--apply-checked`；写回后归集就一律听你的
 
 **勾过的条目过一阵又变回未完成**
 - 症状：明明勾过，重跑后又变成待办
@@ -240,7 +259,7 @@ python3 scripts/harvest.py --apply-checked ./checked.json
 | 预览不写盘 | `python3 scripts/harvest.py --dry-run [--sample 60]` |
 | 正式归集 | `python3 scripts/harvest.py` |
 | 只要数据不要页面 | `python3 scripts/harvest.py --no-html` |
-| 写回勾选结果 | `python3 scripts/harvest.py --apply-checked ./checked.json` |
+| 写回勾选 / 归属调整 | `python3 scripts/harvest.py --apply-checked ./checked.json` |
 | 单独渲染页面 | `python3 scripts/render_todos.py --data ./todos.json --out ./todos.html` |
 
 | 参考文件 | 内容 |

@@ -14,10 +14,11 @@ render_todos.py — 把 harvest.py 产出的待办清单渲染成一份本地 HT
   · 按项目分组查看；项目名 / 事由 / 来源文件 / 日期一目了然
   · 项目与状态筛选；分组折叠
   · 勾选框（存 localStorage，刷新不丢）
-  · 一键导出勾选结果 → checked.json，交给 harvest.py --apply-checked 写回
+  · 调整归属：自动分错项目时点条目右侧「改组」手工纠正，同样存本地、随导出写回
+  · 一键导出结果 → checked.json，交给 harvest.py --apply-checked 写回
 
 页面**不能**做什么
-  · 直接改磁盘文件（浏览器做不了）。勾选结果要写回，必须走导出 + 命令行两步。
+  · 直接改磁盘文件（浏览器做不了）。勾选与归属调整要写回，必须走导出 + 命令行两步。
     这是刻意设计：归集产物与人工判定都落在你自己的磁盘上，页面只是视图。
 """
 import argparse
@@ -90,6 +91,24 @@ max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bd.stale{background:#f1f5f9;color:#64748b}
 .bd.new{background:#fef3c7;color:#92400e}
 .src{font-size:11px;color:var(--tx3);margin-top:3px;word-break:break-all}
+.it .pk{flex:0 0 auto;margin-top:2px;padding:1px 8px;border-radius:6px;border:1px solid var(--bd);
+background:var(--card);color:var(--tx3);font-size:11px;line-height:18px;white-space:nowrap;cursor:pointer}
+.it .pk:hover{border-color:var(--pri);color:var(--pri-d)}
+.mask{position:fixed;inset:0;background:rgba(15,23,32,.42);display:flex;align-items:center;
+justify-content:center;padding:16px;z-index:99}
+.panel{width:min(420px,100%);max-height:min(76vh,560px);display:flex;flex-direction:column;
+background:var(--card);border:1px solid var(--bd);border-radius:12px;overflow:hidden}
+.ph{padding:14px 16px 2px;font-size:15px;font-weight:600}
+.ps{padding:0 16px 10px;font-size:12px;color:var(--tx3);line-height:1.5}
+.ps b{color:var(--pri-d)}
+.pl{flex:1;overflow-y:auto;padding:0 8px 8px}
+.pi{display:flex;align-items:center;gap:10px;width:100%;text-align:left;min-height:40px;padding:8px 10px;
+border-radius:8px;color:var(--tx);font-size:13.5px;border:0;background:none;cursor:pointer}
+.pi:hover{background:var(--bg)}
+.pi .tk{flex:0 0 16px;color:var(--pri-d);font-weight:700}
+.pi .nm2{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pi.cur{background:#eefaf8;font-weight:600}
+.pf{padding:10px 16px;border-top:1px solid var(--bd);display:flex;justify-content:flex-end}
 .bar{display:flex;gap:8px;align-items:center;margin:14px 0 18px;flex-wrap:wrap}
 .btn{font-size:13px;padding:6px 14px;border-radius:7px;border:1px solid var(--bd);background:var(--card);
 color:var(--tx);cursor:pointer}
@@ -113,18 +132,26 @@ color:var(--tx);cursor:pointer}
 <div class="chips" id="chips"></div>
 <div id="list"></div>
 </div>
+<div id="gpHost" hidden></div>
 <script type="application/json" id="payload">__DATA__</script>
 <script>
 (function(){
 var P=JSON.parse(document.getElementById('payload').textContent);
 var S=P.sessions||[], PR=P.projects||[];
 var LS='memory_todo_harvest_checked';
+var LA='memory_todo_harvest_assign';
 var checked={};    /* 条目 id → 勾选态 */
 var checkedT={};   /* 规范化标题 → 勾选态：记忆里的文字被改写后 id 会变，用它兜住 */
+var assign={};     /* 条目 id → 调整后的项目 id（空串 = 未分类） */
 try{checked=JSON.parse(localStorage.getItem(LS)||'{}')}catch(e){checked={}}
 try{checkedT=JSON.parse(localStorage.getItem(LS+'__t')||'{}')}catch(e){checkedT={}}
+try{assign=JSON.parse(localStorage.getItem(LA)||'{}')}catch(e){assign={}}
 function save(){try{localStorage.setItem(LS,JSON.stringify(checked))}catch(e){}
 try{localStorage.setItem(LS+'__t',JSON.stringify(checkedT))}catch(e){}}
+function saveAssign(){try{localStorage.setItem(LA,JSON.stringify(assign))}catch(e){}}
+var byId={};S.forEach(function(t){byId[t.id]=t;t._orig=t.projectId||''});
+/* 把本地调整过的归属应用到数据上：条目按调整后的项目归组，刷新页面依然生效 */
+Object.keys(assign).forEach(function(id){if(byId[id])byId[id].projectId=assign[id]});
 function norm(s){return String(s==null?'':s).toLowerCase().replace(/[^\\w\\u4e00-\\u9fff]+/g,'')}
 function titleHit(t){var n=norm(t.title);if(n.length<6)return false;
 for(var k in checkedT){if(checkedT[k]&&k.length>=6&&(k.indexOf(n)>=0||n.indexOf(k)>=0))return true}
@@ -172,6 +199,37 @@ function chip(k,v,l,n,dot){
   return '<button class="chip'+(F[k]===v?' on':'')+'" data-k="'+k+'" data-v="'+esc(v)+'">'+
   (dot?'<span class="dot" style="background:'+dot+'"></span>':'')+esc(l)+
   '<span class="n">'+n+'</span></button>'}
+/* ---- 调整归属 ----
+   自动归属是「按标题 / 事由 / 章节打分猜出来的」，只能猜。猜错时在这里手工纠正：
+   选择记在本地（刷新不丢），导出时随 checked.json 一起带走，由 harvest.py
+   --apply-checked 写进判定档案，下次归集优先采用 —— 只改页面不写档案，
+   下次归集会被重算覆盖。 */
+var pickId='';
+function groupOpts(cur){
+  var h='<button class="pi'+(cur===''?' cur':'')+'" data-pid="">'+
+  '<span class="tk">'+(cur===''?'✓':'')+'</span><span class="nm2">未分类</span></button>';
+  PR.forEach(function(p){
+    h+='<button class="pi'+(cur===p.id?' cur':'')+'" data-pid="'+esc(p.id)+'">'+
+    '<span class="tk">'+(cur===p.id?'✓':'')+'</span><span class="nm2">'+esc(p.name)+'</span></button>'});
+  return h}
+function openPick(id){
+  var t=byId[id];if(!t)return;
+  pickId=id;var cur=t.projectId||'';
+  document.getElementById('gpHost').innerHTML=
+  '<div class="mask" id="gmask"><div class="panel">'+
+  '<div class="ph">这条待办归到哪个项目？</div>'+
+  '<div class="ps">当前：<b>'+esc(pn(cur)||'未分类')+'</b>。选好后点「导出勾选结果」，'+
+  '再执行 harvest.py --apply-checked 写回，下次归集就按新的来。</div>'+
+  '<div class="pl">'+groupOpts(cur)+'</div>'+
+  '<div class="pf"><button class="btn" id="gclose">取消</button></div></div></div>';
+  document.getElementById('gpHost').hidden=false}
+function closePick(){var g=document.getElementById('gpHost');
+  g.hidden=true;g.innerHTML='';pickId=''}
+function applyPick(pid){
+  var t=byId[pickId];if(!t){closePick();return}
+  t.projectId=pid;
+  if(pid===(t._orig||''))delete assign[t.id];else assign[t.id]=pid;
+  saveAssign();closePick();draw()}
 function item(t,gp){
   var cls='it'+(isDone(t)?' done':'');
   var h='<div class="'+cls+'"><div class="ck'+(isDone(t)?' on':'')+'" data-id="'+esc(t.id)+'">'+
@@ -185,7 +243,9 @@ function item(t,gp){
   if(t.source)h+='<span class="bd">'+esc(t.source)+'</span>';
   h+='</div>';
   if(t.logBase)h+='<div class="src">'+esc(t.logBase)+'</div>';
-  return h+'</div></div>'}
+  h+='</div>';
+  if(!isDone(t))h+='<button class="pk" data-pick="'+esc(t.id)+'" title="调整归属：自动分错时手工纠正，导出后写回">改组</button>';
+  return h+'</div>'}
 function grp(name,count,extra,inner,key){
   var op=F.open[key]!==false;
   if(name==='已完成'||name==='历史遗留')op=!!F.open[key];
@@ -218,23 +278,33 @@ function draw(){
     d0.map(function(t){return item(t,pn(t.projectId))}).join(''),'G_DONE');
   document.getElementById('list').innerHTML=h||'<div class="empty">当前筛选没有匹配的待办</div>';
   var nc=Object.keys(checked).filter(function(k){return checked[k]}).length;
-  document.getElementById('tip').textContent=nc?('本地已勾选 '+nc+' 条，点「导出勾选结果」生成 checked.json'):'';
+  var na=Object.keys(assign).length;
+  document.getElementById('tip').textContent=(nc||na)?
+    ('本地已勾选 '+nc+' 条'+(na?('、调整归属 '+na+' 条'):'')+'，点「导出勾选结果」生成 checked.json'):'';
 }
 document.addEventListener('click',function(e){
   var c=e.target.closest('.chip');
   if(c){F[c.dataset.k]=F[c.dataset.k]===c.dataset.v?'':c.dataset.v;F.open={};draw();return}
+  var p=e.target.closest('[data-pid]');
+  if(p){applyPick(p.dataset.pid);return}
+  if(e.target.closest('#gclose')||e.target.id==='gmask'){closePick();return}
   var k=e.target.closest('.ck');
   if(k){var id=k.dataset.id;checked[id]=!checked[id];save();draw();return}
+  var pk=e.target.closest('[data-pick]');
+  if(pk){openPick(pk.dataset.pick);return}
   var g=e.target.closest('.gh');
   if(g){var G=g.parentElement;var key=G.dataset.k;G.classList.toggle('open');
     F.open[key]=G.classList.contains('open');return}});
 document.getElementById('exp').addEventListener('click',function(){
   var on=[],off=[];S.forEach(function(t){(checked[t.id]?on:off).push(t.id)});
   var out={generatedAt:new Date().toISOString(),checked:on,unchecked:off};
+  var na=Object.keys(assign).length;
+  if(na)out.assign=assign;      /* 归属调整随勾选结果一起导出 */
   var b=new Blob([JSON.stringify(out,null,1)],{type:'application/json'});
   var a=document.createElement('a');a.href=URL.createObjectURL(b);
   a.download='checked.json';a.click();URL.revokeObjectURL(a.href);
-  document.getElementById('tip').textContent='已导出 checked.json（'+on.length+' 条勾选）';});
+  document.getElementById('tip').textContent='已导出 checked.json（'+on.length+' 条勾选'+
+  (na?('、'+na+' 条归属调整'):'')+'）';});
 document.getElementById('clr').addEventListener('click',function(){
   checked={};save();draw();document.getElementById('tip').textContent='本地勾选已清空';});
 draw();
