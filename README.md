@@ -89,6 +89,9 @@ Agent 每天写下大量记忆流水与规则文件。待办**确实写在里面
 ## 🚀 Quick start
 
 ```bash
+# 0. 判定逻辑自检（正向全过 + 反向自证；判定逻辑改动后必跑）
+python3 skills/memory-todo-harvest/scripts/harvest.py --selftest
+
 # 1. 生成配置模板
 python3 skills/memory-todo-harvest/scripts/harvest.py --init
 
@@ -147,6 +150,7 @@ python3 skills/memory-todo-harvest/scripts/render_todos.py --data ./todos.json -
 
 ## ✅ Verification / 验收
 
+- [ ] `--selftest` 退出码为 0（正向全过 **且** 反向可失败）
 - [ ] `--dry-run` 命中量落在几十条量级（上千条 = 口径配错）
 - [ ] 抽样 60 条，人工准确率 ≥ 90%
 - [ ] 连跑两遍输出一致（幂等）

@@ -4,7 +4,7 @@ slug: memory-todo-harvest
 displayName: 记忆待办归集
 summary: 把散落在 agent 记忆文件与规则文件里的待办事项，归集成一份能勾选、可按项目分组、可手工纠正归属的本地待办清单，并生成一份自包含的可视化页面。覆盖各家 agent 的记忆目录与项目指令文件（各家规则文件、自动记忆目录、memory-bank 等），只认显式待办信号把已完成的会话流水挡在门外，并给每条待办标出它属于哪个项目、为什么事留下。纯标准库单脚本，不联网，数据全在本机。
 description: 从 agent 的记忆文件与规则文件里归集待办清单，并生成可勾选的本地页面。当用户说「待办散落在各处、记了但看不到」「从记忆/日志里提取待办」「想要一个统一待办清单」「会话记录太多全是噪音」「归集出来的待办看不懂属于哪个项目」「勾了状态怕丢」「给记忆文件做个待办面板」「把项目里的规则文件清单汇总」时必须优先触发。覆盖 AGENTS.md、GEMINI.md、.cursorrules、.windsurfrules、.clinerules、copilot-instructions.md 等各家指令文件，以及各 agent 的 memory / memory-bank 目录。不适用于：多人任务协作与派工（属项目管理工具）、从源码注释里扫 TODO（属代码扫描器）、笔记软件内建任务体系（其插件已覆盖）。
-version: 1.2.0
+version: 1.3.0
 license: MIT
 author: johnsmithCA-sta
 homepage: https://github.com/johnsmithCA-sta/memory-todo-harvest
@@ -48,6 +48,7 @@ tags:
 - 待办散落在各处 / 记了但看不到 / 提取待办 / 归集待办 / 整理待办
 - 统一清单 / 待办清单 / 个人待办 / 待办面板
 - 记忆文件 / 记忆目录 / 规则文件 / 日志里 / 会话记录 / 全是噪音
+- AGENTS.md / CLAUDE.md / GEMINI.md 里的清单汇总
 - 属于哪个项目 / 项目归属 / 看不出归属
 - 勾选之后 / 重建数据 / 判定丢失 / 状态怕丢
 - extract todos / harvest todos / agent memory / unified todo list
@@ -102,7 +103,8 @@ tags:
   错误的归属比诚实的未分类更糟
 
 **质量门槛**
-- 抽样核准准确率 ≥ 90% 才写盘；连跑两遍输出必须完全一致（幂等）
+- 抽样核准准确率 ≥ 90% 才写盘；连跑两遍输出必须完全一致（幂等）—— 比的是**条目清单**，不是文件字节（写盘会刷新 `updated` 时间戳，按 md5 比必然不等）
+- 状态判定自测（`--selftest`）须**正向全过、反向可失败**——一个永远 PASS 的自测等于没测
 - 清单里不得出现密码 / token 明文（凭据自动掩码）
 - 未分类数不为 0 时，先查项目台账有没有缺项，再怀疑算法
 
@@ -110,6 +112,15 @@ tags:
 并显式说明偏离理由与替代动作——不静默偏离。
 
 ## Steps
+
+### 前置：判定逻辑自检
+
+```bash
+python3 scripts/harvest.py --selftest
+```
+
+两项都要过：正向用例**全过**，且把护栏临时清空后**必须出现失败**（证明用例表真能测出这类缺陷）。
+退出码非 0 就先别往下走——状态判定有问题，后面归集出来的完成 / 归档都是错的。
 
 ### 0. 生成配置
 
@@ -144,7 +155,7 @@ python3 scripts/harvest.py --dry-run --sample 60
 python3 scripts/harvest.py
 ```
 
-产出 `todos.json` + `todo-state.json`。**连跑两遍，输出应完全一致**（幂等）。
+产出 `todos.json` + `todo-state.json`。**连跑两遍，条目清单应完全一致**（幂等；`updated` 时间戳字段每次都会刷新，属预期，不影响幂等判定）。
 
 ### 4. 看清单
 
@@ -179,9 +190,10 @@ python3 scripts/harvest.py --apply-checked ./checked.json
 
 ## Verification Checklist
 
+- [ ] `--selftest` 退出码为 0（正向全过 **且** 反向可失败）
 - [ ] `--dry-run` 能列出记忆文件，命中量在几十条量级
 - [ ] 抽样 60 条，人工判断准确率 ≥ 90%
-- [ ] 连跑两遍输出完全一致（幂等）
+- [ ] 连跑两遍**条目清单**完全一致（幂等）—— ⚠️ 别拿文件 md5 比：`todos.json` / `todo-state.json` 每次写入都会刷新 `updated` 时间戳，按字节比会误判成「不可幂等」。校验方式：比对去掉 `updated` 后的条目内容（或直接比对条目条数 + id + 标题）
 - [ ] 未分类接近 0；不为 0 时先查项目台账
 - [ ] 抽查 5 条，项目归属与事由标签可读
 - [ ] 页面零控制台错误；折叠组重渲染两次仍保持展开；勾选不触发整页重排
@@ -213,6 +225,11 @@ python3 scripts/harvest.py --apply-checked ./checked.json
 - 症状：清单里出现成段的叙述句，而不是待办
 - 原因：待办章节判定过宽；或文档里写了**裸的**待办写法示例（示例没包在反引号里）
 - 修复：把示例包进反引号；检查有没有「待办清单整理」这类以「待办」开头却在讲别的事的章节名
+
+**条目标题拖了一条长尾巴**
+- 症状：某条待办的标题是一长串，把后面的说明、指针、链接也一起带了进来
+- 原因：行内标记（`**待办**：`）的正文是**取到行尾**的——标记之后写的任何内容都会并进标题
+- 修复：**待办正文独占一行**；要带的指针 / 上下文写在「待办」标记**之前**的加粗片段里
 
 **大批条目「未分类」**
 - 症状：页面上一大半条目没有项目归属
@@ -255,6 +272,7 @@ python3 scripts/harvest.py --apply-checked ./checked.json
 
 | 操作 | 命令 |
 |---|---|
+| 判定逻辑自检 | `python3 scripts/harvest.py --selftest` |
 | 生成配置 | `python3 scripts/harvest.py --init` |
 | 预览不写盘 | `python3 scripts/harvest.py --dry-run [--sample 60]` |
 | 正式归集 | `python3 scripts/harvest.py` |

@@ -44,8 +44,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG = os.path.join(HERE, "harvest.config.json")
 
 DEF_EXCLUDE_DIRS = ["node_modules", ".git", "__pycache__", ".venv", "venv",
-                    "_archive", "dist", "build", ".next", ".next", "vendor",
-                    "site-packages", ".mypy_cache", ".pytest_cache"]
+                    "_archive", "dist", "build", ".next", "vendor",
+                    "site-packages", ".mypy_cache", ".pytest_cache",
+                    # 归档区：被归档的条目本身已经完成或作废，再捞回来就是自噬
+                    "memory-archive"]
 DEF_EXCLUDE_FRAGS = ["/automations/"]        # 自动化流水日志目录，整目录跳过
 
 # 「记忆目录」：agent 按天/按主题写下的流水与档案。命中其一即整目录纳入扫描。
@@ -194,9 +196,16 @@ DONE_FALSE = [
     "仅方案", "仅调研", "仅建议", "仅本机", "暂停", "待定",
     "下一步", "TODO", "待实施", "待落地", "待补", "待更新",
 ]
-DONE_ABANDONED = ["叫停", "已放弃", "不做了", "搁置", "不采纳", "暂缓", "暂不动", "暂不"]
+DONE_ABANDONED = ["叫停", "已放弃", "不做了", "搁置", "不采纳", "已排除", "暂缓", "暂不动", "暂不"]
 WEAK_TRUE = ["完成", "成功", "通过"]
-NEG_PREFIX = ("未", "尚未", "还没", "没有", "待", "未能够")
+# 左邻否定前缀：紧挨信号词左侧出现时语义反转（「未搁置」≠「搁置」）
+NEG_PREFIX = ("未", "尚未", "还没", "没有", "待", "未能够", "不")
+# 右邻「未定语义」护栏：`暂不` 只有两个字，在 `暂不定 / 暂不确定 / 暂不可用 /
+# 暂不适用 / 暂不涉及` 这类语境里语义与「弃用」相反（= 开放项），但纯子串匹配照样命中。
+# 只对本身是「片段」的信号词登记；完整词（叫停 / 搁置 / 暂不动…）无需护栏。
+SIG_SUFFIX_GUARD = {
+    "暂不": ("定", "确", "涉", "适", "可", "清", "详", "知", "明"),
+}
 NOTE_PREFIX = ("💡", "⚠️", "❌", "🔥", "📌", "❗")
 
 # 时间前缀清洗
@@ -329,30 +338,59 @@ def is_todo_section(title):
     return False
 
 
+def _occ_ok(h, w, idx):
+    """某个命中位置（h[idx:idx+len(w)] == w）是否作数。
+
+    归档分支若只做纯子串匹配、不查否定前缀，会把「未搁置 / 还没叫停 /
+    暂不确定」这类**否定或未定语义**的句子当成「已弃用」，真待办从清单上消失。
+
+    代价不对称故取保守侧：误归档 = 开放项**不可见**（静默失控）；
+    多留一条噪音 = 清单多一行。归档分支上宁可漏报。
+    """
+    if any(h[max(0, idx - 3):idx].endswith(p) for p in NEG_PREFIX):
+        return False                                  # 左邻否定前缀：语义反转
+    bad = SIG_SUFFIX_GUARD.get(w)
+    if bad and h[idx + len(w):idx + len(w) + 1] in bad:
+        return False                                  # 右邻未定后缀：片段误命中
+    return True
+
+
+def scan_signal(h, words):
+    """逐词、逐次出现扫描：返回首个「未被否定」的命中词；全被否定 → ''。
+
+    不能用 `w in h`：需跳过被否定的那一次出现、继续找下一次
+    （如「未搁置，已叫停」应命中「叫停」，而不是被「搁置」的否定拖累）。
+    """
+    for w in words:
+        idx = h.find(w)
+        while idx != -1:
+            if _occ_ok(h, w, idx):
+                return w
+            idx = h.find(w, idx + 1)
+    return ""
+
+
 def detect_status(text):
     """返回 (done: bool|None, signal: str)。无信号 → (None, '')。
 
     优先级：终结信号（叫停/放弃→归档）> 否定 > 强真 > 弱真。
+    终结信号与弱真均须过 `_occ_ok` 护栏（否定前缀 / 未定后缀）。
     """
     h = text or ""
     if h.lstrip().startswith(NOTE_PREFIX):
         return None, ""
-    for w in DONE_ABANDONED:
-        if w in h:
-            return True, w
+    w = scan_signal(h, DONE_ABANDONED)
+    if w:
+        return True, w
     for w in DONE_FALSE:
         if w in h:
             return False, w
     for w in DONE_TRUE:
         if w in h:
             return True, w
-    for w in WEAK_TRUE:
-        idx = h.find(w)
-        while idx != -1:
-            prefix = h[max(0, idx - 3):idx]
-            if not any(prefix.endswith(p) for p in NEG_PREFIX):
-                return True, w
-            idx = h.find(w, idx + 1)
+    w = scan_signal(h, WEAK_TRUE)
+    if w:
+        return True, w
     return None, ""
 
 
@@ -1364,6 +1402,82 @@ def auto_render_html():
         return None
 
 
+# ---------------------------------------------------------------- 自测（--selftest）
+# (文本, 期望 done, 期望 signal；signal 为 None 表示不校验该字段)
+SELFTEST_CASES = [
+    # —— 真弃用：必须判归档，并命中正确的词 ——
+    ("该方案已叫停，转本地部署",                     True,  "叫停"),
+    ("旧口径已放弃，改用新增逻辑",                   True,  "已放弃"),
+    ("这个需求不做了",                              True,  "不做了"),
+    ("扩容方案搁置",                                True,  "搁置"),
+    ("③ 全量体检（用户已排除）",                     True,  "已排除"),
+    ("上云暂缓，先本地跑",                           True,  "暂缓"),
+    ("部署脚本是否改配置读取 → 暂不动，留待后续",      True,  "暂不动"),
+    ("#6 暂不同步",                                 True,  "暂不"),
+    ("#6 暂不发布，继续观察",                        True,  "暂不"),
+    ("该功能不采纳，转外部工具",                      True,  "不采纳"),
+    # —— 否定语义：左邻否定前缀，不得归档 ——
+    ("该方案未搁置，仍待拍板",                       False, "待拍板"),
+    ("还没叫停，先留着",                             None,  None),
+    ("上云尚未暂缓，本周照旧",                        None,  None),
+    ("旧接口未叫停，继续用",                          None,  None),
+    ("验收不通过，需返工",                           None,  None),   # 弱真也不得被否定式触发
+    # —— 未定语义：右邻护栏，`暂不` 是片段不是信号 ——
+    ("处理口径暂不确定",                             None,  None),
+    ("覆盖范围暂不涉及本期",                          None,  None),
+    ("该接口暂不可用",                               None,  None),
+    ("是否做灰度暂不定",                             None,  None),
+    # —— 回归：弱真仍工作 / 备注行不参与判定 ——
+    ("验收通过",                                    True,  "通过"),
+    ("⚠️ 未搁置（注意）",                           None,  ""),      # NOTE_PREFIX 直接短路
+]
+
+
+def _run_cases():
+    """跑用例表，返回失败描述列表（空 = 全过）。"""
+    bad = []
+    for text, want_done, want_sig in SELFTEST_CASES:
+        got_done, got_sig = detect_status(text)
+        if got_done != want_done or (want_sig is not None and got_sig != want_sig):
+            bad.append(f"{text!r} → 期望 done={want_done}/signal={want_sig}，"
+                       f"实得 done={got_done}/signal={got_sig}")
+    return bad
+
+
+def selftest():
+    """状态判定自测：正向用例 + 反向自测（自证能报 FAIL）。
+
+    反向自测的必要性：一个永远 PASS 的自测等于没测。这里临时把两条护栏
+    清空后重跑同一用例表，**必须出现失败**；若反向也全过，说明用例表
+    测不出该类缺陷 → 自测本身判 FAIL。
+    """
+    total = len(SELFTEST_CASES)
+    bad = _run_cases()
+    print(f"[selftest] 正向：{total - len(bad)}/{total} PASS")
+    for b in bad:
+        print(f"  ❌ {b}")
+
+    global NEG_PREFIX, SIG_SUFFIX_GUARD
+    saved_neg, saved_suf = NEG_PREFIX, SIG_SUFFIX_GUARD
+    try:
+        NEG_PREFIX, SIG_SUFFIX_GUARD = (), {}
+        rev_bad = _run_cases()
+    finally:
+        NEG_PREFIX, SIG_SUFFIX_GUARD = saved_neg, saved_suf
+    print(f"[selftest] 反向（清空护栏）：{len(rev_bad)}/{total} 例转为 FAIL（须 ≥1）")
+    for b in rev_bad:
+        print(f"  ↯ {b}")
+
+    if bad:
+        print("[selftest] FAIL 正向用例未全过")
+        return 1
+    if not rev_bad:
+        print("[selftest] FAIL 反向自测未生效：清空护栏后用例仍全过，说明用例表测不出该缺陷")
+        return 1
+    print("[selftest] OK 正向全过 + 反向可失败（护栏确实在起作用）")
+    return 0
+
+
 def main():
     p = argparse.ArgumentParser(
         description="从 agent 记忆文件打捞待办清单",
@@ -1372,6 +1486,7 @@ def main():
   harvest.py --init                     生成 harvest.config.json 模板
   harvest.py --dry-run                  先看命中了什么（不写盘）
   harvest.py --dry-run --sample 60      附带抽样明细，人工核准确率
+  harvest.py --selftest                 跑状态判定自测（正向 + 反向护栏自证）
   harvest.py                            正式写盘 todos.json
 """)
     p.add_argument("--config", help="配置文件路径（默认 ./harvest.config.json）")
@@ -1382,7 +1497,12 @@ def main():
     p.add_argument("--apply-checked", metavar="FILE",
                    help="把 todos.html 导出的 checked.json 写回清单与判定档案")
     p.add_argument("--no-html", action="store_true", help="归集后不生成 HTML 清单")
+    p.add_argument("--selftest", action="store_true",
+                   help="跑状态判定自测（正向用例 + 反向护栏自证）后退出")
     args = p.parse_args()
+
+    if args.selftest:
+        return selftest()
 
     if args.init:
         path = init_config(args.config)
