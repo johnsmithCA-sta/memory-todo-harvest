@@ -4,7 +4,7 @@ slug: memory-todo-harvest
 displayName: 记忆待办归集
 summary: 把散落在 agent 记忆文件与规则文件里的待办事项，归集成一份能勾选、可按项目分组、可手工纠正归属的本地待办清单，并生成一份自包含的可视化页面。覆盖各家 agent 的记忆目录与项目指令文件（各家规则文件、自动记忆目录、memory-bank 等），只认显式待办信号把已完成的会话流水挡在门外，并给每条待办标出它属于哪个项目、为什么事留下。纯标准库单脚本，不联网，数据全在本机。
 description: 从 agent 的记忆文件与规则文件里归集待办清单，并生成可勾选的本地页面。当用户说「待办散落在各处、记了但看不到」「从记忆/日志里提取待办」「想要一个统一待办清单」「会话记录太多全是噪音」「归集出来的待办看不懂属于哪个项目」「勾了状态怕丢」「给记忆文件做个待办面板」「把项目里的规则文件清单汇总」时必须优先触发。覆盖 AGENTS.md、GEMINI.md、.cursorrules、.windsurfrules、.clinerules、copilot-instructions.md 等各家指令文件，以及各 agent 的 memory / memory-bank 目录。不适用于：多人任务协作与派工（属项目管理工具）、从源码注释里扫 TODO（属代码扫描器）、笔记软件内建任务体系（其插件已覆盖）。
-version: 1.3.0
+version: 1.3.1
 license: MIT
 author: johnsmithCA-sta
 homepage: https://github.com/johnsmithCA-sta/memory-todo-harvest

@@ -102,6 +102,7 @@ def load_config(path=None):
     cfg.setdefault("instruction_depth", DEF_INSTRUCTION_DEPTH)
     cfg.setdefault("container_dirs", [])
     cfg.setdefault("dir_project_map", {})
+    cfg.setdefault("root_project_map", {})   # 专属项目根（路径→项目名）：比章节锚更强的归属事实
     cfg.setdefault("stale_days", 14)
     cfg.setdefault("per_file_cap", 100)
     cfg.setdefault("render_html", True)          # 归集后自动生成 todos.html
@@ -180,6 +181,11 @@ RE_SECRET = re.compile(r"(密码|口令)\s*(?:已有|已为|为|是)?\s*[:：]\s
 RE_CHECKBOX = re.compile(r"^\s*[-*+]\s*\[([ xX])\]\s*(.+)$")
 RE_BULLET = re.compile(r"^\s*[-*+]\s+(.+)$")
 RE_HEADING = re.compile(r"^(#{2,4})\s+(.*)$")
+# 指针句（2026-09-25 与工作台 collect_machine 同步修复）：「详见 xxx.md」「参见 §5」
+# 是记录性指引，不是行动项。允许前缀带编号（「2. 详见 …」来自数字清单拆分）。
+RE_POINTER_SENTENCE = re.compile(r"^(?:\d{1,2}[.、)）]\s*)?(详见|参见|另见|参阅)")
+# 续行引导符：bullet 手工换行后的补语行（缩进或箭头开头）是上一条的延续
+CONTINUATION_MARKS = "⇒→➜⇢"
 
 # ---------------------------------------------------------------- 状态信号白名单
 DONE_TRUE = [
@@ -468,9 +474,9 @@ def title_overlap(a, b):
     return len(A & B) / min(len(A), len(B))
 
 
-def resolve_state(sid, title, logbase, st, same_file=0.6, cross_file=0.85,
+def resolve_state(sid, title, logbase, st, lineno=0, same_file=0.6, cross_file=0.85,
                   containment=0.9, contain_min_len=6):
-    """人工判定优先：先精确 id，再模糊标题（抗标题微调导致的 id 漂移）。
+    """人工判定优先：先精确 id，再「同文件+同行号」定位，最后模糊标题。
 
     分级阈值（实测标定）：
       · 同一记忆文件（同一 logBase）→ 宽松 0.6，冲突概率低（同文件的
@@ -481,6 +487,13 @@ def resolve_state(sid, title, logbase, st, same_file=0.6, cross_file=0.85,
     子串（重叠率 ≥ 0.9）。原文被删掉尾补语时 Jaccard 会跌破 0.6，而重叠率仍是
     1.0；只认同文件、且规范化后短串 ≥ 6 字，避免极短串乱吞长标题。
 
+    补充通道（2026-09-22，v1.3.1）：加「同 logBase + 同行号 + 标题重叠 ≥ 0.5」。
+    **这是实测复现过的缺陷**：做完事常把该条待办改写成结论句（`X 决策（986 份，
+    已成必答）` → `X 决策（986 份）→ 建议暂不装，等覆盖不足时再评估`），2-gram
+    Jaccard 会跌到 0.6 以下 ⇒ 页面上已核销的条目**重新变成「待确认」候选**。
+    append-only 记忆文件里旧行不因追加而移动，**行号比标题更稳**；再叠加重叠
+    ≥0.5 作护栏（防文件被大幅重写后行号指向另一条待办）。
+
     取向不变：宁可不匹配（退回未完成，人工再勾一次），也不能误匹配
     （错误关闭真实待办）。
 
@@ -489,6 +502,24 @@ def resolve_state(sid, title, logbase, st, same_file=0.6, cross_file=0.85,
     for kind in ("dismissed", "done"):
         if sid in (st.get(kind) or {}):
             return kind, sid
+    # 通道 2：同文件 + 同行号（抗标题改写；行号缺失时自动跳过）
+    if lineno:
+        best_sc, best_kind, best_key = 0.0, None, None
+        for kind in ("dismissed", "done"):
+            for k, v in (st.get(kind) or {}).items():
+                if (v.get("logBase") or "") != logbase:
+                    continue
+                try:
+                    same_line = int(v.get("lineNo") or 0) == int(lineno)
+                except (TypeError, ValueError):
+                    same_line = False
+                if not same_line:
+                    continue
+                ov = title_overlap(title, v.get("title"))
+                if ov >= 0.5 and ov > best_sc:
+                    best_sc, best_kind, best_key = ov, kind, k
+        if best_kind:
+            return best_kind, best_key
     nt = norm_title(title)
     best_sc, best_kind, best_key = 0.0, None, None
     for kind in ("dismissed", "done"):
@@ -518,14 +549,34 @@ def find_old_by_overlap(it, old_sessions, min_ratio=0.9, min_len=6):
     与 resolve_state 的包含通道同源：源文本被改写后 id 变了，旧记录里的人工状态
     （已确认 pending=false / 已勾完成）必须跟着走，否则「已经处理过的任务」
     每次运行都会重新变成待确认候选。
+
+    v1.3.1：优先走「同行号 + 重叠 ≥0.5」通道（与 resolve_state 一致），
+    改写幅度较大时也能把「已确认」状态带过来。
     """
+    same_file_old = [s for s in old_sessions
+                     if s.get("id") and (s.get("logFile") or "") == it["logFile"]]
+    try:
+        ln = int(it.get("lineNo") or 0)
+    except (TypeError, ValueError):
+        ln = 0
+    if ln:
+        best, best_ov = None, 0.0
+        for s in same_file_old:
+            try:
+                if int(s.get("lineNo") or 0) != ln:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            ov = title_overlap(it["title"], s.get("title"))
+            if ov >= 0.5 and ov > best_ov:
+                best, best_ov = s, ov
+        if best:
+            return best
     nt = norm_title(it["title"])
     if len(nt) < min_len:
         return None
     best, best_ov = None, 0.0
-    for s in old_sessions:
-        if not s.get("id") or (s.get("logFile") or "") != it["logFile"]:
-            continue
+    for s in same_file_old:
         ov = title_overlap(it["title"], s.get("title"))
         if ov >= min_ratio and ov > best_ov:
             best, best_ov = s, ov
@@ -802,6 +853,10 @@ def parse_log_todos(path, proj_root, proj_idx=None):
             return
         if t.startswith("（示例）") or "（示例）" in t:
             return
+        # 指针句不是行动项（2026-09-25 实测：「2. 详见 law-fetch-接续指令集_20260923.md
+        # （本轮新建）」被收成待办）。只挡句首，不挡句中出现。
+        if RE_POINTER_SENTENCE.match(t):
+            return
         items.append({
             "title": t,
             "done": done,
@@ -903,7 +958,22 @@ def parse_log_todos(path, proj_root, proj_idx=None):
         # A) 待办章节内的列表项 / 段落
         if cur_section:
             mb = RE_BULLET.match(line)
-            body = mb.group(1) if mb else line.strip()
+            # 续行合并（2026-09-25 与工作台 collect_machine 同步修复）：markdown 日志
+            # 的 bullet 常手工换行，缩进续行 / 箭头引导的补语行是**上一条的延续**。
+            # 旧口径按行切分，会把「文档漂移未修：… ⇒ 建议…」拆成两条独立待办。
+            # 只合并进同章节的上一条 section 条目（inline/checkbox 不吞续行）。
+            stripped = line.strip()
+            prev = items[-1] if items else None
+            if (not mb and prev is not None and prev.get("src") == "section"
+                    and prev.get("origin") == cur_section
+                    and (line[:1] in (" ", "\t") or stripped[:1] in CONTINUATION_MARKS)):
+                merged = f"{prev['title']} {stripped}".strip()
+                prev["title"] = merged[:400]          # 防多行段落无限拼接
+                d2, sig2 = detect_status(clean_item(merged))
+                if d2 is not None:                    # 续行携带状态信号 → 以合并后全文重判
+                    prev["done"], prev["signal"] = d2, sig2
+                continue
+            body = mb.group(1) if mb else stripped
             d, sig = detect_status(body)
             if d is None:                 # 条目无信号 → 继承章节信号，仍无则视为未完成
                 d = cur_sec_done if cur_sec_done is not None else False
@@ -1075,6 +1145,13 @@ def collect(dry_run=False, sample=0):
         # 目录兜底：容器目录（只是「放项目的文件夹」）不是项目，跳过
         if dname not in _cfg("container_dirs"):
             sig.append((2, match_project(_cfg("dir_project_map").get(dname, dname), proj_idx)[0], "目录"))
+        # 路径根（2026-09-25 与工作台 collect_machine 同步修复）：日志文件物理上住在
+        # **专属项目根**下（root_project_map 显式映射）。最强的归属事实，压过章节锚 /
+        # 文件主题 / 目录（5.5），但仍让位给标题/上下文直书的项目名（6/5 不变——
+        # 这里指条目自身写明别的项目时以文本为准）。
+        _rn = _cfg("root_project_map").get(it["projRoot"] or "")
+        if _rn:
+            sig.append((5.5, match_project(_rn, proj_idx)[0], "路径根"))
         best = max(sig, key=lambda x: x[0] if x[1] else -1)
         if best[1]:
             pid, kwsrc = best[1]["id"], best[2]
@@ -1141,6 +1218,10 @@ def collect(dry_run=False, sample=0):
             pending = False
         elif it.get("src") in EXPLICIT_SRC:
             pending = False
+        elif state_kind == "done":
+            # v1.3.1：已人工核销的条目不该再以「候选」身份出现（哪怕这次是靠
+            # 模糊/同行号通道认回来的），否则页面表象 =「明明办完了还在待办里」。
+            pending = False
         elif old:
             pending = bool(old.get("pending", False))
         elif not had_v4:
@@ -1153,6 +1234,7 @@ def collect(dry_run=False, sample=0):
             pool = tstate["done"] if state_kind == "done" else tstate["dismissed"]
             rec = dict(pool.pop(matched, {}))
             rec.update({"title": it["title"], "logBase": it["logBase"],
+                        "lineNo": it.get("lineNo") or 0,
                         "at": time.strftime("%Y-%m-%d %H:%M"), "by": "migrated"})
             pool[sid] = rec
             migrated_from[matched] = sid
@@ -1176,6 +1258,10 @@ def collect(dry_run=False, sample=0):
             "logFile": it["logFile"],
             "logBase": it["logBase"],
             "logDate": it["date"],
+            # v1.3.1：源文件行号。append-only 记忆文件里旧行不因追加而移动 ⇒
+            # 比标题更稳，供核销判定（resolve_state）与候选状态继承
+            # （find_old_by_overlap）定位用。
+            "lineNo": it.get("lineNo") or 0,
             "startedAt": f"{it['date']}T00:00:00.000Z",
             "firstSeen": old.get("firstSeen") or it["date"],
             "archived": bool(done),
@@ -1327,6 +1413,9 @@ def apply_checked(checked_path):
         st["done"][tid] = {
             "title": t.get("title") or "",
             "logBase": t.get("logBase") or "",
+            # v1.3.1：记源行号 —— 条目被改写成结论句后仍能认回核销判定
+            # （否则 2-gram 相似度跌破阈值 ⇒ 已核销条目复活成候选）。
+            "lineNo": t.get("lineNo") or 0,
             "projectId": t.get("projectId") or "",
             "at": time.strftime("%Y-%m-%d %H:%M"),
             "by": "page",
@@ -1364,6 +1453,7 @@ def apply_checked(checked_path):
                 "projectId": pid,
                 "title": t.get("title") or "",
                 "logBase": t.get("logBase") or "",
+                "lineNo": t.get("lineNo") or 0,
                 "at": time.strftime("%Y-%m-%d %H:%M"),
                 "by": "page",
             }
@@ -1444,16 +1534,52 @@ def _run_cases():
     return bad
 
 
-def selftest():
-    """状态判定自测：正向用例 + 反向自测（自证能报 FAIL）。
+# resolve_state 用例（v1.3.1「同行号」通道）：
+#   (名称, 档案记录, 待办文本, 行号, 期望 kind)
+# 档案固定为 logBase=2026-09-20.md、lineNo=366 的一条已核销记录。
+RS_STATE = {
+    "done": {"T_RS": {"title": "2. LibreOffice 决策（986 份，已成必答）",
+                      "logBase": "2026-09-20.md", "lineNo": 366}},
+    "dismissed": {},
+}
+RS_CASES = [
+    # 正向①：原样
+    ("原样",          RS_STATE, "2. LibreOffice 决策（986 份，已成必答）", 366, "done"),
+    # 正向②：改写为结论句（Jaccard 跌破 0.6，旧口径丢判定 → 本条是本次修复重点）
+    ("改写成结论句",   RS_STATE, "LibreOffice 决策（986 份）→ 建议暂不装，等 textutil 覆盖不足时再评估", 366, "done"),
+    # 正向③：前置项目名后改写
+    ("前置项目名改写", RS_STATE, "**知识库**：LibreOffice 决策（986 份）结论暂不装", 366, "done"),
+    # 反向①：同行号但内容完全不同（文件被重排后行号指向另一条）→ 必须不命中
+    ("同行号异内容",   RS_STATE, "扫描件 PDF OCR 决策（559 份）", 366, None),
+    # 反向②：同文本但行号不同 → 该通道不生效（自证「行号」是必要条件）
+    ("异行号同文本",   RS_STATE, "LibreOffice 决策（986 份）→ 建议暂不装，等 textutil 覆盖不足时再评估", 999, None),
+    # 反向③：无行号（老档案）→ 退回原模糊通道，改写幅度大时不命中
+    ("无行号",        RS_STATE, "LibreOffice 决策（986 份）→ 建议暂不装，等 textutil 覆盖不足时再评估", 0, None),
+]
 
-    反向自测的必要性：一个永远 PASS 的自测等于没测。这里临时把两条护栏
-    清空后重跑同一用例表，**必须出现失败**；若反向也全过，说明用例表
-    测不出该类缺陷 → 自测本身判 FAIL。
+
+def _run_resolve_cases():
+    bad = []
+    for name, st, title, lineno, want in RS_CASES:
+        sid = "T_" + hashlib.md5(f"x::{title}".encode("utf-8")).hexdigest()[:11]
+        kind, _k = resolve_state(sid, title, "2026-09-20.md", st, lineno=lineno)
+        if kind != want:
+            bad.append(f"{name}：期望 kind={want}，实得 {kind}")
+    return bad
+
+
+def selftest():
+    """状态判定自测：正向用例 + **反向自测**（自证能报 FAIL）。
+
+    反向自测的必要性：一个永远 PASS 的自测等于没测。
+    ① detect_status：临时把两条护栏清空后重跑同一用例表，**必须出现失败**；
+    ② resolve_state：用例表自带反向例（同行号异内容 / 异行号 / 无行号），
+       反向例全过 = 该通道真的在做判别，而不是无脑命中。
     """
+    rc = 0
     total = len(SELFTEST_CASES)
     bad = _run_cases()
-    print(f"[selftest] 正向：{total - len(bad)}/{total} PASS")
+    print(f"[selftest] detect_status 正向：{total - len(bad)}/{total} PASS")
     for b in bad:
         print(f"  ❌ {b}")
 
@@ -1464,18 +1590,28 @@ def selftest():
         rev_bad = _run_cases()
     finally:
         NEG_PREFIX, SIG_SUFFIX_GUARD = saved_neg, saved_suf
-    print(f"[selftest] 反向（清空护栏）：{len(rev_bad)}/{total} 例转为 FAIL（须 ≥1）")
+    print(f"[selftest] detect_status 反向（清空护栏）：{len(rev_bad)}/{total} 例转为 FAIL（须 ≥1）")
     for b in rev_bad:
         print(f"  ↯ {b}")
 
     if bad:
         print("[selftest] FAIL 正向用例未全过")
-        return 1
+        rc = 1
     if not rev_bad:
         print("[selftest] FAIL 反向自测未生效：清空护栏后用例仍全过，说明用例表测不出该缺陷")
-        return 1
-    print("[selftest] OK 正向全过 + 反向可失败（护栏确实在起作用）")
-    return 0
+        rc = 1
+
+    rbad = _run_resolve_cases()
+    print(f"[selftest] resolve_state（同行号通道）：{len(RS_CASES) - len(rbad)}/{len(RS_CASES)} PASS"
+          f"（含 {sum(1 for c in RS_CASES if c[4] is None)} 条反向例）")
+    for b in rbad:
+        print(f"  ❌ {b}")
+    if rbad:
+        print("[selftest] FAIL resolve_state 用例未全过")
+        rc = 1
+    if not rc:
+        print("[selftest] OK 正向全过 + 反向可失败（护栏与通道确实在起作用）")
+    return rc
 
 
 def main():
